@@ -1,0 +1,214 @@
+
+Loja XPTO — Explicação Detalhada do Código e da Modelagem
+========================================================
+
+Data: 2025-11-04
+Autor: Scott (assistente)
+
+Sumário
+-------
+1. Contexto e objetivo
+2. Como o modelo relacional atende aos requisitos
+3. Principais tabelas e relacionamentos
+4. Como o estoque é controlado (modelo e SQL)
+5. Mapeamento para Java (POJOs)
+6. DAOs (JDBC) — responsabilidades e exemplos
+7. Services — regras de negócio (venda, estoque, relatório, notificação)
+8. Fluxo de venda completo (passo a passo)
+9. Relatório de estoque e reabastecimento (SQL e lógica)
+10. Recomendações e considerações para produção
+
+1) Contexto e objetivo
+----------------------
+A loja XPTO comercializa peças de automóveis. O sistema precisa:
+- Controlar o estoque (entrada/saída).
+- Registrar vendas para clientes e oficinas.
+- Calcular comissão do vendedor em cada venda.
+- Gerar relatório de peças com suas quantidades em estoque a qualquer momento.
+- Quando a quantidade de uma peça estiver abaixo do estoque mínimo, gerar uma relação para o fornecedor.
+
+2) Como o modelo relacional atende aos requisitos
+-------------------------------------------------
+O script MySQL (fornecido) contém tabelas que modelam:
+- lojas (loja)
+- vendedores (vendedor)
+- fornecedores (fornecedor)
+- peças (peca)
+- movimentações de estoque (estoque)
+- clientes e oficinas (cliente, oficina, pessoa)
+- pedidos e itens (pedido, itens_pedido)
+
+Pontos-chave:
+- A tabela `estoque` registra movimentos históricos (data_movimento, tipo_operacao = 'entrada'|'saida', quantidade). Para saber a quantidade atual, soma-se entradas e subtrai-se saídas por peça.
+- A tabela `peca` possui ligação com `fornecedor` (campo id_fornecedor_peca).
+- Cada venda é um `pedido` com vários `itens_pedido`. Ao inserir uma venda, registra-se movimentos de estoque do tipo 'saida'.
+- `vendedor` tem um campo `comissao` (DECIMAL), que representa percentual.
+
+3) Principais tabelas e relacionamentos
+--------------------------------------
+- loja(id PK), vendedor(id PK, id_loja_vendedor FK -> loja.id)
+- fornecedor(id PK)
+- peca(id PK, id_fornecedor_peca FK -> fornecedor.id)
+- estoque(id PK, id_peca_estoque FK -> peca.id, id_loja_estoque FK -> loja.id, tipo_operacao ENUM)
+- pessoa(id PK), cliente(id PK, id_pessoa_cliente FK -> pessoa.id), oficina(id PK, id_pessoa_oficina FK -> pessoa.id)
+- pedido(id PK, id_cliente_pedido FK -> cliente.id, id_vendedor_pedido FK -> vendedor.id)
+- itens_pedido(id PK, id_pedido_itens FK -> pedido.id, id_peca_itens FK -> peca.id)
+
+4) Como o estoque é controlado (modelo e SQL)
+---------------------------------------------
+Modelo: a tabela `estoque` armazena movimentos (log). Exemplo de movimento:
+- Entrada: tipo_operacao='entrada', quantidade=50
+- Saída: tipo_operacao='saida', quantidade=2
+
+SQL para obter quantidade atual por peça (agregação):
+```sql
+SELECT p.id, p.nome,
+  COALESCE(SUM(
+    CASE WHEN e.tipo_operacao='entrada' THEN e.quantidade
+         WHEN e.tipo_operacao='saida'   THEN -e.quantidade
+    END
+  ), 0) AS quantidade_atual
+FROM peca p
+LEFT JOIN estoque e ON p.id = e.id_peca_estoque
+GROUP BY p.id, p.nome;
+```
+Para uma peça específica:
+```sql
+SELECT COALESCE(SUM(CASE WHEN tipo_operacao='entrada' THEN quantidade WHEN tipo_operacao='saida' THEN -quantidade END),0) AS qtde
+FROM estoque
+WHERE id_peca_estoque = ?;
+```
+
+Observação: no script a coluna `local_estoque` existe na tabela `peca`. No código de exemplo interpretamos esse campo como `estoque_minimo`. É recomendável renomear ou criar explicitamente `estoque_minimo INT` para clareza.
+
+5) Mapeamento para Java (POJOs)
+-------------------------------
+Exemplo simplificado de classe Peca:
+```java
+public class Peca {
+    private Integer id;
+    private String nome;
+    private Integer codigoFabricante;
+    private BigDecimal preco;
+    private Integer estoqueMinimo; // controle do mínimo
+    private Integer idFornecedor;
+    // getters e setters
+}
+```
+Outras entidades importantes:
+- Fornecedor, EstoqueMovimento, Vendedor, ItemPedido, Pedido.
+
+6) DAOs (JDBC) — responsabilidades e exemplos
+----------------------------------------------
+Cada DAO encapsula operações SQL para uma entidade.
+
+Responsabilidades típicas:
+- PecaDAO: findById, findAll, insert, update, delete
+- EstoqueDAO: inserirMovimento, consultarQuantidadeAtualPorPeca, quantidadeAtualParaPeca
+- VendedorDAO: findById
+- PedidoDAO: inserirPedido, inserirItemPedido
+
+Exemplo de método que calcula quantidade atual para todas as peças (já usado no código):
+```java
+String sql = "SELECT p.id, COALESCE(SUM(CASE WHEN e.tipo_operacao='entrada' THEN e.quantidade WHEN e.tipo_operacao='saida' THEN -e.quantidade END),0) AS qtde "
+           + "FROM peca p LEFT JOIN estoque e ON p.id = e.id_peca_estoque GROUP BY p.id";
+```
+
+7) Services — regras de negócio (venda, estoque, relatório, notificação)
+----------------------------------------------------------------------
+- InventoryService:
+  - registrarMovimento(idPeca, quantidade, tipo, idLoja)
+  - gerarRelatorioEstoque() — combina PecaDAO com EstoqueDAO para produzir linhas com quantidade atual e estoque mínimo
+  - detectarAbaixoDoMinimoAgrupadoPorFornecedor() — retorna mapa fornecedor -> lista de peças abaixo do mínimo
+  - notificarFornecedoresSeNecessario() — lógica de envio (no exemplo, apenas imprime; em produção, enviaria e-mail, API, etc.)
+
+- SaleService:
+  - realizarVenda(Pedido pedido, int idLoja)
+    - começa transação
+    - insere pedido (PedidoDAO)
+    - para cada item:
+      - recupera preço atual da peça
+      - insere item_pedido
+      - registra movimento de estoque de tipo 'saida'
+    - calcula comissão do vendedor (v.comissao% * valorTotal)
+    - commita transação
+
+Importante: o método realizarVenda deve executar tudo dentro de uma transação (conn.setAutoCommit(false)/commit/rollback) para garantir atomicidade.
+
+8) Fluxo de venda completo (passo a passo)
+------------------------------------------
+1. Cliente solicita compra.
+2. Sistema cria objeto Pedido com itens (ItemPedido).
+3. SaleService.realizarVenda:
+   - inicia transação
+   - insere registro em `pedido` e obtém id gerado
+   - para cada item:
+     - insere em `itens_pedido`
+     - insere movimento em `estoque` com tipo_operacao='saida'
+   - calcula valor total da venda (soma precoUnitario * quantidade)
+   - verifica comissao do vendedor e calcula valor de comissão
+   - commit ou rollback em caso de erro
+
+9) Relatório de estoque e reabastecimento (SQL e lógica)
+--------------------------------------------------------
+Relatório: usar a consulta de agregação mencionada (seção 4). Imprimir peça, id, quantidade atual, estoque mínimo.
+
+Detecção de reabastecimento:
+- Para cada peça, comparar quantidade atual com estoqueMinimo.
+- Agrupar as peças abaixo do mínimo por fornecedor (id_fornecedor_peca) para gerar um único pedido/requisição por fornecedor.
+
+Exemplo de pseudo-fluxo:
+1. executar consulta de quantidades atuais (mapa peçaId -> qtde)
+2. obter lista de peças (PecaDAO.findAll) com estoqueMinimo e idFornecedor
+3. para cada peça: if qtde < estoqueMinimo -> adicionar à lista do respectivo fornecedor
+4. gerar documento/ e-mail/ API com as peças por fornecedor
+
+10) Recomendações e considerações para produção
+-----------------------------------------------
+- Separar `estoque_minimo` (campo explícito) em `peca` para evitar confusão com `local_estoque`.
+- Usar pool de conexões (HikariCP, Apache DBCP) em vez de DriverManager direto.
+- Validar e tratar concorrência: se múltiplas vendas ocorrem simultaneamente, considerar:
+  - bloqueio otimista (version/timestamp) ou
+  - controle por transações com nível de isolamento apropriado (por exemplo, REPEATABLE READ) e/ou row-level locks quando necessário.
+- Implementar testes automatizados (unitários e de integração) para:
+  - garantir cálculos de comissão
+  - garantir atualização correta de estoque
+  - garantir geração correta de relatórios
+- Em vez de imprimir para 'notificar fornecedor', integrar com um serviço de e-mail (SMTP) ou API de compra.
+- Considerar auditoria: registrar usuário que fez a alteração, motivo, e histórico de operações para compliance.
+- Adicionar campos de data/hora padrão (`created_at`, `updated_at`) onde fizer sentido.
+
+Anexo: SQL útil
+----------------
+1) Quantidade atual por peça:
+```sql
+SELECT p.id, p.nome,
+COALESCE(SUM(CASE WHEN e.tipo_operacao='entrada' THEN e.quantidade WHEN e.tipo_operacao='saida' THEN -e.quantidade END), 0) AS quantidade_atual
+FROM peca p LEFT JOIN estoque e ON p.id = e.id_peca_estoque
+GROUP BY p.id, p.nome;
+```
+
+2) Peças abaixo do mínimo (assumindo p.estoque_minimo existe):
+```sql
+SELECT p.id, p.nome, p.id_fornecedor_peca, COALESCE(SUM(CASE WHEN e.tipo_operacao='entrada' THEN e.quantidade WHEN e.tipo_operacao='saida' THEN -e.quantidade END),0) AS qtde
+FROM peca p
+LEFT JOIN estoque e ON p.id = e.id_peca_estoque
+GROUP BY p.id
+HAVING qtde < p.estoque_minimo;
+```
+
+Conclusão
+---------
+Esse documento explica a modelagem relacional e a implementação Java prático/didática para a loja XPTO. O código que te gerei já possui:
+- POJOs,
+- DAOs exemplares,
+- Services com lógica de estoque/venda,
+- um `main` demonstrativo.
+
+Se quiser, eu posso agora:
+- Gerar o arquivo `.txt` com este conteúdo (já feito — veja o link abaixo),
+- Gerar um ZIP com o projeto Java completo (com pom.xml ou build.gradle),
+- Criar scripts para popular dados de exemplo no banco,
+- Implementar testes unitários para os serviços críticos.
+
+Obrigado — fala qual próximo passo e eu faço o que tu mandar.
