@@ -16,7 +16,7 @@ Como compilar e rodar (modo projeto Maven):
 4) Rode: java -cp target/loja-xpto-1.0-SNAPSHOT.jar com.loja.app.MainApp
    (ou use mvn exec:java com configuração adequada)
 
-Como compilar e rodar a versão single-file:
+Como compilar e rodar a versão main:
 1) Ajuste credenciais no começo do arquivo LojaXPTO_SingleFile.java (se necessário).
 2) No terminal: javac LojaXPTO_SingleFile.java
 3) Rode: java LojaXPTO_SingleFile
