@@ -3,7 +3,6 @@ Loja XPTO — Explicação Detalhada do Código e da Modelagem
 ========================================================
 
 Data: 2025-11-04
-Autor: Scott (assistente)
 
 Sumário
 -------
@@ -211,4 +210,3 @@ Se quiser, eu posso agora:
 - Criar scripts para popular dados de exemplo no banco,
 - Implementar testes unitários para os serviços críticos.
 
-Obrigado — fala qual próximo passo e eu faço o que tu mandar.
